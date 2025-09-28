@@ -1,80 +1,53 @@
 #!/bin/bash
-# Dante SOCKS5 一键安装脚本 for CentOS 7.6
-# 安装目录: /usr/local/dante
-# 配置文件: /etc/sockd.conf
-# systemd:  /etc/systemd/system/sockd.service
 
-set -e
+# 检查是否有用户名和密码环境变量
+if [ -z "$SOCKS5_USER" ] || [ -z "$SOCKS5_PASS" ]; then
+  echo "错误：请在生产环境中设置环境变量 SOCKS5_USER 和 SOCKS5_PASS"
+  echo "例如：export SOCKS5_USER='your_username' && export SOCKS5_PASS='your_password'"
+  exit 1
+fi
 
-USERNAME="socks5user"
-PASSWORD="redback"
-PORT="1080"
+# 更新系统软件包
+echo "更新系统软件包..."
+sudo apt update -y
+sudo apt upgrade -y
 
-echo "[1/6] 安装依赖..."
-yum install -y gcc make wget tar firewalld
+# 安装 Dante 依赖
+echo "安装 Dante 依赖..."
+sudo apt install -y dante-server
 
-echo "[2/6] 下载并编译 Dante..."
-cd /usr/local/src
-wget -O dante-1.4.2.tar.gz https://www.inet.no/dante/files/dante-1.4.2.tar.gz
-tar xzf dante-1.4.2.tar.gz
-cd dante-1.4.2
-./configure --prefix=/usr/local/dante
-make && make install
+# 创建一个没有登录权限的用户
+echo "创建用户名为 $SOCKS5_USER 的系统用户..."
+sudo useradd -M -s /usr/sbin/nologin $SOCKS5_USER
+echo "$SOCKS5_USER:$SOCKS5_PASS" | sudo chpasswd
 
-echo "[3/6] 创建配置文件..."
-cat > /etc/sockd.conf <<EOF
-logoutput: syslog
-
-internal: 0.0.0.0 port = ${PORT}
-external: 0.0.0.0
-
+# 配置 Dante 服务器
+echo "配置 Dante SOCKS5 代理..."
+cat <<EOF | sudo tee /etc/danted.conf
+logoutput: /var/log/danted.log
+internal: eth0 port = 1080
+external: eth0
 method: username
-user.notprivileged: nobody
-
-client pass {
-    from: 0.0.0.0/0 to: 0.0.0.0/0
-    log: connect disconnect error
-}
-
-socks pass {
-    from: 0.0.0.0/0 to: 0.0.0.0/0
-    log: connect disconnect error
-}
+user.privileged: root
+user.unprivileged: nobody
+socksmethod: username
+user.libwrap: no
+clientmethod: none
+user.$SOCKS5_USER: $SOCKS5_PASS
 EOF
 
-echo "[4/6] 创建 systemd 服务..."
-cat > /etc/systemd/system/sockd.service <<EOF
-[Unit]
-Description=Dante SOCKS5 Proxy
-After=network.target
+# 设置防火墙规则（开放 1080 端口）
+echo "配置防火墙规则..."
+sudo ufw allow 1080/tcp
+sudo ufw reload
 
-[Service]
-Type=simple
-ExecStart=/usr/local/dante/sbin/sockd -f /etc/sockd.conf
-Restart=always
+# 启动 Dante 服务
+echo "启动 Dante SOCKS5 代理服务..."
+sudo systemctl restart danted
+sudo systemctl enable danted
 
-[Install]
-WantedBy=multi-user.target
-EOF
+# 检查 Dante 服务状态
+echo "检查 Dante 服务状态..."
+sudo systemctl status danted
 
-echo "[5/6] 添加用户..."
-id -u ${USERNAME} &>/dev/null || useradd ${USERNAME}
-echo "${USERNAME}:${PASSWORD}" | chpasswd
-
-echo "[6/6] 配置防火墙并启动服务..."
-systemctl enable firewalld
-systemctl start firewalld
-firewall-cmd --permanent --add-port=${PORT}/tcp
-firewall-cmd --permanent --add-port=${PORT}/udp
-firewall-cmd --reload
-
-systemctl daemon-reexec
-systemctl daemon-reload
-systemctl enable sockd
-systemctl restart sockd
-
-echo "✅ Dante SOCKS5 安装完成！"
-echo "服务状态: systemctl status sockd"
-echo "SOCKS5 地址: 服务器IP:${PORT}"
-echo "用户名: ${USERNAME}"
-echo "密码: ${PASSWORD}"
+echo "安装完成，Dante SOCKS5 代理服务正在运行，端口：16999，用户名：$SOCKS5_USER"
